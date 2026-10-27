@@ -1,0 +1,97 @@
+name: Build Windows x64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-windows.yml"
+      - "CMakeLists.txt"
+      - "vcpkg.json"
+      - "source/**"
+      - "vcproj/**"
+      - "brushes/**"
+      - "data/**"
+      - "extensions/**"
+      - "icons/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Windows x64 Release
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configure CMake
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel 2
+
+      - name: Install application files
+        shell: pwsh
+        run: cmake --install build --config Release --prefix package
+
+      - name: Bundle runtime DLLs
+        shell: pwsh
+        run: |
+          $candidateDirs = @(
+            (Join-Path $PWD "build/vcpkg_installed/x64-windows/bin"),
+            (Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/x64-windows/bin")
+          )
+
+          $runtimeDir = $candidateDirs | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $runtimeDir) {
+            throw "Could not locate the vcpkg x64-windows runtime DLL directory."
+          }
+
+          Get-ChildItem -LiteralPath $runtimeDir -Filter *.dll -File |
+            Copy-Item -Destination (Join-Path $PWD "package") -Force
+
+      - name: Verify portable package
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "package/NexaMap Editor.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "NexaMap Editor.exe was not produced."
+          }
+
+          $dllCount = (Get-ChildItem -LiteralPath (Join-Path $PWD "package") -Filter *.dll -File).Count
+          if ($dllCount -eq 0) {
+            throw "No runtime DLLs were bundled."
+          }
+
+          @(
+            "NexaMap Editor - Windows x64 Release"
+            "Commit: ${{ github.sha }}"
+            "Workflow run: ${{ github.run_id }}"
+            "Runtime DLLs bundled: $dllCount"
+          ) | Set-Content -LiteralPath (Join-Path $PWD "package/BUILD-INFO.txt") -Encoding utf8
+
+          Get-ChildItem -LiteralPath (Join-Path $PWD "package") |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
+      - name: Upload portable Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexaMap-Editor-Windows-x64-${{ github.run_number }}
+          path: package/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 30
